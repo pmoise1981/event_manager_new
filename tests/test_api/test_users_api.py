@@ -1,191 +1,169 @@
-from builtins import str
-import pytest
-from httpx import AsyncClient
-from app.main import app
-from app.models.user_model import User
-from app.utils.nickname_gen import generate_nickname
-from app.utils.security import hash_password
-from app.services.jwt_service import decode_token  # Import your FastAPI app
+"""
+This Python file is part of a FastAPI application, demonstrating user management functionalities including creating, reading,
+updating, and deleting (CRUD) user information. It uses OAuth2 with Password Flow for security, ensuring that only authenticated
+users can perform certain operations. Additionally, the file showcases the integration of FastAPI with SQLAlchemy for asynchronous
+database operations, enhancing performance by non-blocking database calls.
 
-# Example of a test function using the async_client fixture
-@pytest.mark.asyncio
-async def test_create_user_access_denied(async_client, user_token, email_service):
-    headers = {"Authorization": f"Bearer {user_token}"}
-    # Define user data for the test
-    user_data = {
-        "nickname": generate_nickname(),
-        "email": "test@example.com",
-        "password": "sS#fdasrongPassword123!",
-    }
-    # Send a POST request to create a user
-    response = await async_client.post("/users/", json=user_data, headers=headers)
-    # Asserts
-    assert response.status_code == 403
+The implementation emphasizes RESTful API principles, with endpoints for each CRUD operation and the use of HTTP status codes
+and exceptions to communicate the outcome of operations. It introduces the concept of HATEOAS (Hypermedia as the Engine of
+Application State) by including navigational links in API responses, allowing clients to discover other related operations dynamically.
 
-# You can similarly refactor other test functions to use the async_client fixture
-@pytest.mark.asyncio
-async def test_retrieve_user_access_denied(async_client, verified_user, user_token):
-    headers = {"Authorization": f"Bearer {user_token}"}
-    response = await async_client.get(f"/users/{verified_user.id}", headers=headers)
-    assert response.status_code == 403
+OAuth2PasswordBearer is employed to extract the token from the Authorization header and verify the user's identity, providing a layer
+of security to the operations that manipulate user data.
 
-@pytest.mark.asyncio
-async def test_retrieve_user_access_allowed(async_client, admin_user, admin_token):
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    response = await async_client.get(f"/users/{admin_user.id}", headers=headers)
-    assert response.status_code == 200
-    assert response.json()["id"] == str(admin_user.id)
+Key Highlights:
+- Use of FastAPI's Dependency Injection system to manage database sessions and user authentication.
+- Demonstrates how to perform CRUD operations in an asynchronous manner using SQLAlchemy with FastAPI.
+- Implements HATEOAS by generating dynamic links for user-related actions, enhancing API discoverability.
+- Utilizes OAuth2PasswordBearer for securing API endpoints, requiring valid access tokens for operations.
+"""
 
-@pytest.mark.asyncio
-async def test_update_user_email_access_denied(async_client, verified_user, user_token):
-    updated_data = {"email": f"updated_{verified_user.id}@example.com"}
-    headers = {"Authorization": f"Bearer {user_token}"}
-    response = await async_client.put(f"/users/{verified_user.id}", json=updated_data, headers=headers)
-    assert response.status_code == 403
+from builtins import dict, int, len, str
+from datetime import timedelta
+from uuid import UUID
+from fastapi import APIRouter, Depends, HTTPException, Response, status, Request
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from sqlalchemy.ext.asyncio import AsyncSession
+from app.dependencies import get_current_user, get_db, get_email_service, require_role
+from app.schemas.pagination_schema import EnhancedPagination
+from app.schemas.token_schema import TokenResponse
+from app.schemas.user_schemas import LoginRequest, UserBase, UserCreate, UserListResponse, UserResponse, UserUpdate
+from app.services.user_service import UserService
+from app.services.jwt_service import create_access_token
+from app.utils.link_generation import create_user_links, generate_pagination_links
+from app.dependencies import get_settings
+from app.services.email_service import EmailService
 
-@pytest.mark.asyncio
-async def test_update_user_email_access_allowed(async_client, admin_user, admin_token):
-    updated_data = {"email": f"updated_{admin_user.id}@example.com"}
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    response = await async_client.put(f"/users/{admin_user.id}", json=updated_data, headers=headers)
-    assert response.status_code == 200
-    assert response.json()["email"] == updated_data["email"]
+router = APIRouter()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="login")
+settings = get_settings()
 
-
-@pytest.mark.asyncio
-async def test_delete_user(async_client, admin_user, admin_token):
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    delete_response = await async_client.delete(f"/users/{admin_user.id}", headers=headers)
-    assert delete_response.status_code == 204
-    # Verify the user is deleted
-    fetch_response = await async_client.get(f"/users/{admin_user.id}", headers=headers)
-    assert fetch_response.status_code == 404
-
-@pytest.mark.asyncio
-async def test_create_user_duplicate_email(async_client, verified_user):
-    user_data = {
-        "email": verified_user.email,
-        "password": "AnotherPassword123!",
-    }
-    response = await async_client.post("/register/", json=user_data)
-    assert response.status_code == 400
-    assert "Email already exists" in response.json().get("detail", "")
-
-@pytest.mark.asyncio
-async def test_create_user_invalid_email(async_client):
-    user_data = {
-        "email": "notanemail",
-        "password": "ValidPassword123!",
-    }
-    response = await async_client.post("/register/", json=user_data)
-    assert response.status_code == 422
-
-import pytest
-from app.services.jwt_service import decode_token
-from urllib.parse import urlencode
-
-@pytest.mark.asyncio
-async def test_login_success(async_client, verified_user):
-    # Attempt to login with the test user
-    form_data = {
-        "username": verified_user.email,
-        "password": "MySuperPassword$1234"
-    }
-    response = await async_client.post("/login/", data=urlencode(form_data), headers={"Content-Type": "application/x-www-form-urlencoded"})
-    
-    # Check for successful login response
-    assert response.status_code == 200
-    data = response.json()
-    assert "access_token" in data
-    assert data["token_type"] == "bearer"
-
-    # Use the decode_token method from jwt_service to decode the JWT
-    decoded_token = decode_token(data["access_token"])
-    assert decoded_token is not None, "Failed to decode token"
-    assert decoded_token["role"] == "AUTHENTICATED", "The user role should be AUTHENTICATED"
-
-@pytest.mark.asyncio
-async def test_login_user_not_found(async_client):
-    form_data = {
-        "username": "nonexistentuser@here.edu",
-        "password": "DoesNotMatter123!"
-    }
-    response = await async_client.post("/login/", data=urlencode(form_data), headers={"Content-Type": "application/x-www-form-urlencoded"})
-    assert response.status_code == 401
-    assert "Incorrect email or password." in response.json().get("detail", "")
-
-@pytest.mark.asyncio
-async def test_login_incorrect_password(async_client, verified_user):
-    form_data = {
-        "username": verified_user.email,
-        "password": "IncorrectPassword123!"
-    }
-    response = await async_client.post("/login/", data=urlencode(form_data), headers={"Content-Type": "application/x-www-form-urlencoded"})
-    assert response.status_code == 401
-    assert "Incorrect email or password." in response.json().get("detail", "")
-
-@pytest.mark.asyncio
-async def test_login_unverified_user(async_client, unverified_user):
-    form_data = {
-        "username": unverified_user.email,
-        "password": "MySuperPassword$1234"
-    }
-    response = await async_client.post("/login/", data=urlencode(form_data), headers={"Content-Type": "application/x-www-form-urlencoded"})
-    assert response.status_code == 401
-
-@pytest.mark.asyncio
-async def test_login_locked_user(async_client, locked_user):
-    form_data = {
-        "username": locked_user.email,
-        "password": "MySuperPassword$1234"
-    }
-    response = await async_client.post("/login/", data=urlencode(form_data), headers={"Content-Type": "application/x-www-form-urlencoded"})
-    assert response.status_code == 400
-    assert "Account locked due to too many failed login attempts." in response.json().get("detail", "")
-@pytest.mark.asyncio
-async def test_delete_user_does_not_exist(async_client, admin_token):
-    non_existent_user_id = "00000000-0000-0000-0000-000000000000"  # Valid UUID format
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    delete_response = await async_client.delete(f"/users/{non_existent_user_id}", headers=headers)
-    assert delete_response.status_code == 404
-
-@pytest.mark.asyncio
-async def test_update_user_github(async_client, admin_user, admin_token):
-    updated_data = {"github_profile_url": "http://www.github.com/kaw393939"}
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    response = await async_client.put(f"/users/{admin_user.id}", json=updated_data, headers=headers)
-    assert response.status_code == 200
-    assert response.json()["github_profile_url"] == updated_data["github_profile_url"]
-
-@pytest.mark.asyncio
-async def test_update_user_linkedin(async_client, admin_user, admin_token):
-    updated_data = {"linkedin_profile_url": "http://www.linkedin.com/kaw393939"}
-    headers = {"Authorization": f"Bearer {admin_token}"}
-    response = await async_client.put(f"/users/{admin_user.id}", json=updated_data, headers=headers)
-    assert response.status_code == 200
-    assert response.json()["linkedin_profile_url"] == updated_data["linkedin_profile_url"]
-
-@pytest.mark.asyncio
-async def test_list_users_as_admin(async_client, admin_token):
-    response = await async_client.get(
-        "/users/",
-        headers={"Authorization": f"Bearer {admin_token}"}
+@router.get("/users/{user_id}", response_model=UserResponse, name="get_user", tags=["User Management Requires (Admin or Manager Roles)"])
+async def get_user(user_id: UUID, request: Request, db: AsyncSession = Depends(get_db), token: str = Depends(oauth2_scheme), current_user: dict = Depends(require_role(["ADMIN", "MANAGER"]))):
+    user = await UserService.get_by_id(db, user_id)
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return UserResponse.model_construct(
+        id=user.id,
+        nickname=user.nickname,
+        first_name=user.first_name,
+        last_name=user.last_name,
+        bio=user.bio,
+        profile_picture_url=user.profile_picture_url,
+        github_profile_url=user.github_profile_url,
+        linkedin_profile_url=user.linkedin_profile_url,
+        role=user.role,
+        email=user.email,
+        last_login_at=user.last_login_at,
+        created_at=user.created_at,
+        updated_at=user.updated_at,
+        links=create_user_links(user.id, request)
     )
-    assert response.status_code == 200
-    assert 'items' in response.json()
 
-@pytest.mark.asyncio
-async def test_list_users_as_manager(async_client, manager_token):
-    response = await async_client.get(
-        "/users/",
-        headers={"Authorization": f"Bearer {manager_token}"}
-    )
-    assert response.status_code == 200
+@router.put("/users/{user_id}", response_model=UserResponse, name="update_user", tags=["User Management Requires (Admin or Manager Roles)"])
+async def update_user(user_id: UUID, user_update: UserUpdate, request: Request, db: AsyncSession = Depends(get_db), token: str = Depends(oauth2_scheme), current_user: dict = Depends(require_role(["ADMIN", "MANAGER"]))):
+    user_data = user_update.model_dump(exclude_unset=True)
+    updated_user = await UserService.update(db, user_id, user_data)
+    if not updated_user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
 
-@pytest.mark.asyncio
-async def test_list_users_unauthorized(async_client, user_token):
-    response = await async_client.get(
-        "/users/",
-        headers={"Authorization": f"Bearer {user_token}"}
+    return UserResponse.model_construct(
+        id=updated_user.id,
+        bio=updated_user.bio,
+        first_name=updated_user.first_name,
+        last_name=updated_user.last_name,
+        nickname=updated_user.nickname,
+        email=updated_user.email,
+        last_login_at=updated_user.last_login_at,
+        profile_picture_url=updated_user.profile_picture_url,
+        github_profile_url=updated_user.github_profile_url,
+        linkedin_profile_url=updated_user.linkedin_profile_url,
+        created_at=updated_user.created_at,
+        updated_at=updated_user.updated_at,
+        links=create_user_links(updated_user.id, request)
     )
-    assert response.status_code == 403  # Forbidden, as expected for regular user
+
+@router.delete("/users/{user_id}", status_code=status.HTTP_204_NO_CONTENT, name="delete_user", tags=["User Management Requires (Admin or Manager Roles)"])
+async def delete_user(user_id: UUID, db: AsyncSession = Depends(get_db), token: str = Depends(oauth2_scheme), current_user: dict = Depends(require_role(["ADMIN", "MANAGER"]))):
+    success = await UserService.delete(db, user_id)
+    if not success:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="User not found")
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
+
+@router.post("/users/", response_model=UserResponse, status_code=status.HTTP_201_CREATED, tags=["User Management Requires (Admin or Manager Roles)"], name="create_user")
+async def create_user(user: UserCreate, request: Request, db: AsyncSession = Depends(get_db), email_service: EmailService = Depends(get_email_service), token: str = Depends(oauth2_scheme), current_user: dict = Depends(require_role(["ADMIN", "MANAGER"]))):
+    existing_user = await UserService.get_by_email(db, user.email)
+    if existing_user:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Email already exists")
+
+    created_user = await UserService.create(db, user.model_dump(), email_service)
+    if not created_user:
+        raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="Failed to create user")
+
+    return UserResponse.model_construct(
+        id=created_user.id,
+        bio=created_user.bio,
+        first_name=created_user.first_name,
+        last_name=created_user.last_name,
+        profile_picture_url=created_user.profile_picture_url,
+        nickname=created_user.nickname,
+        email=created_user.email,
+        last_login_at=created_user.last_login_at,
+        created_at=created_user.created_at,
+        updated_at=created_user.updated_at,
+        links=create_user_links(created_user.id, request)
+    )
+
+@router.get("/users/", response_model=UserListResponse, tags=["User Management Requires (Admin or Manager Roles)"])
+async def list_users(
+    request: Request,
+    skip: int = 0,
+    limit: int = 10,
+    db: AsyncSession = Depends(get_db),
+    current_user: dict = Depends(require_role(["ADMIN", "MANAGER"]))
+):
+    total_users = await UserService.count(db)
+    users = await UserService.list_users(db, skip, limit)
+
+    user_responses = [
+        UserResponse.model_validate(user) for user in users
+    ]
+
+    pagination_links = generate_pagination_links(request, skip, limit, total_users)
+
+    return UserListResponse(
+        items=user_responses,
+        total=total_users,
+        page=skip // limit + 1,
+        size=len(user_responses),
+        links=pagination_links
+    )
+
+@router.post("/register/", response_model=UserResponse, tags=["Login and Registration"])
+async def register(user_data: UserCreate, session: AsyncSession = Depends(get_db), email_service: EmailService = Depends(get_email_service)):
+    user = await UserService.register_user(session, user_data.model_dump(), email_service)
+    if user:
+        return user
+    raise HTTPException(status_code=400, detail="Email already exists")
+
+@router.post("/login/", response_model=TokenResponse, tags=["Login and Registration"])
+async def login(form_data: OAuth2PasswordRequestForm = Depends(), session: AsyncSession = Depends(get_db)):
+    if await UserService.is_account_locked(session, form_data.username):
+        raise HTTPException(status_code=400, detail="Account locked due to too many failed login attempts.")
+
+    user = await UserService.login_user(session, form_data.username, form_data.password)
+    if user:
+        access_token_expires = timedelta(minutes=settings.access_token_expire_minutes)
+        access_token = create_access_token(
+            data={"sub": user.email, "role": str(user.role.name)},
+            expires_delta=access_token_expires
+        )
+        return {"access_token": access_token, "token_type": "bearer"}
+    raise HTTPException(status_code=401, detail="Incorrect email or password.")
+
+@router.get("/verify-email/{user_id}/{token}", status_code=status.HTTP_200_OK, name="verify_email", tags=["Login and Registration"])
+async def verify_email(user_id: UUID, token: str, db: AsyncSession = Depends(get_db), email_service: EmailService = Depends(get_email_service)):
+    if await UserService.verify_email_with_token(db, user_id, token):
+        return {"message": "Email verified successfully"}
+    raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Invalid or expired verification token")
+
